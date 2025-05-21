@@ -11,7 +11,7 @@ RUN npm run build:fly
 RUN export BLOCKLIST_DOWNLOAD_ONLY=true && node ./dist/fly.mjs
 
 # stage 2
-FROM node:alpine AS runner
+FROM node:23.11.1-alpine3.21 AS runner
 
 # env vals persist even at run-time: archive.is/QpXp2
 # and overrides fly.toml env values
