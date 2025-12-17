@@ -5,14 +5,15 @@
  * License, v. 2.0. If a copy of the MPL was not distributed with this
  * file, You can obtain one at http://mozilla.org/MPL/2.0/.
  */
-import * as cfg from "../core/cfg.js";
-import * as util from "../commons/util.js";
 import * as dnsutil from "../commons/dnsutil.js";
 import * as envutil from "../commons/envutil.js";
+import * as util from "../commons/util.js";
 import * as pres from "./plugin-response.js";
 
 const minTtlSec = 30; // 30s
 const maxTtlSec = 180; // 3m
+const expiresImmediately = 0; // 0s
+const someVeryHighTtl = 1 << 30; // 2^30s
 const cheader = "x-rdnscache-metadata";
 const _cacheurl = "https://caches.rethinkdns.com/";
 
@@ -21,9 +22,6 @@ const _cacheHeaderHitValue = "hit";
 const _cacheHeaders = { [_cacheHeaderKey]: _cacheHeaderHitValue };
 
 function determineCacheExpiry(packet) {
-  const expiresImmediately = 0;
-  const someVeryHighTtl = 1 << 30;
-
   // TODO: do not cache :: / 0.0.0.0 upstream answers?
   // expiresImmediately => packet is not an ans but a question
   if (!dnsutil.isAnswer(packet)) return expiresImmediately;
@@ -38,10 +36,11 @@ function determineCacheExpiry(packet) {
   // if no answers, set min-ttl
   if (ttl === someVeryHighTtl) ttl = minTtlSec;
 
+  // see also: isAnswerFresh
   ttl += envutil.cacheTtl();
   const expiry = Date.now() + ttl * 1000;
 
-  return expiry;
+  return expiry; // in millis
 }
 
 /**
@@ -107,7 +106,7 @@ export function cacheValueOf(rdnsResponse) {
   return makeCacheValue(packet, raw, metadata);
 }
 
-export function updateTtl(packet, end) {
+function updateTtl(packet, end) {
   const now = Date.now();
   const actualttl = Math.floor((end - now) / 1000) - envutil.cacheTtl();
   // jitter between min/max to prevent uniform expiry across clients
@@ -118,7 +117,7 @@ export function updateTtl(packet, end) {
   }
 }
 
-function makeId(packet) {
+export function makeId(packet) {
   // multiple questions are kind of an undefined behaviour
   // stackoverflow.com/a/55093896
   if (!dnsutil.hasSingleQuestion(packet)) return null;
@@ -164,13 +163,15 @@ export function makeHttpCacheValue(data) {
 
 /**
  * @param {any} packet
+ * @param {ts} string
  * @returns {URL}
  */
-export function makeHttpCacheKey(packet) {
+export function makeHttpCacheKey(packet, ts) {
   const id = makeId(packet); // ex: domain.tld:A:dnssec
   if (util.emptyString(id)) return null;
+  if (util.emptyString(ts)) ts = util.yyyymm();
 
-  return new URL(_cacheurl + cfg.timestamp() + "/" + id);
+  return new URL(_cacheurl + ts + "/" + id);
 }
 
 /**
@@ -199,7 +200,7 @@ export function hasCacheHeader(h) {
   return h.get(_cacheHeaderKey) === _cacheHeaderHitValue;
 }
 
-export function updateQueryId(decodedDnsPacket, queryId) {
+function updateQueryId(decodedDnsPacket, queryId) {
   if (queryId === decodedDnsPacket.id) return false; // no change
   decodedDnsPacket.id = queryId;
   return true;
@@ -223,11 +224,20 @@ export function hasMetadata(m) {
   return !util.emptyObj(m);
 }
 
+/**
+ * @param {DnsCacheData} v
+ * @returns {boolean}
+ */
 export function hasAnswer(v) {
   if (!hasMetadata(v.metadata)) return false;
   return isAnswerFresh(v.metadata, /* no roll*/ 6);
 }
 
+/**
+ * @param {DnsCacheMetadata} m
+ * @param {number} n
+ * @returns {boolean}
+ */
 export function isAnswerFresh(m, n = 0) {
   // when expiry is 0, c.dnsPacket is a question and not an ans
   // ref: determineCacheExpiry
@@ -246,5 +256,34 @@ export function isAnswerFresh(m, n = 0) {
 export function updatedAnswer(dnsPacket, qid, expiry) {
   updateQueryId(dnsPacket, qid);
   updateTtl(dnsPacket, expiry);
+  trimAQuadAAnswer(dnsPacket);
   return dnsPacket;
+}
+
+function trimAQuadAAnswer(decodedDnsPacket) {
+  // retain only the first answer, drop the rest
+  if (
+    !dnsutil.hasSingleQuestion(decodedDnsPacket) ||
+    !dnsutil.isQueryAQuadA(decodedDnsPacket) ||
+    !dnsutil.hasAnswers(decodedDnsPacket)
+  ) {
+    return;
+  }
+
+  let dotrim = false;
+  const trimmed = new Array(0);
+  for (const a of decodedDnsPacket.answers) {
+    if (dnsutil.isAnswerCname(a)) {
+      trimmed.push(a);
+    }
+    if (dnsutil.isAnswerA(a) || dnsutil.isAnswerAAAA(a)) {
+      trimmed.push(a);
+      dotrim = true;
+      break;
+    }
+  }
+  if (dotrim) {
+    decodedDnsPacket.answers = trimmed;
+  } // else: nothing to trim, return as-is
+  return;
 }

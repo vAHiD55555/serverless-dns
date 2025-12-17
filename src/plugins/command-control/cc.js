@@ -5,21 +5,22 @@
  * License, v. 2.0. If a copy of the MPL was not distributed with this
  * file, You can obtain one at http://mozilla.org/MPL/2.0/.
  */
-import * as cfg from "../../core/cfg.js";
-import * as util from "../../commons/util.js";
-import * as rdnsutil from "../rdns-util.js";
-import * as dnsutil from "../../commons/dnsutil.js";
-import * as pres from "../plugin-response.js";
 import { flagsToTags, tagsToFlags } from "@serverless-dns/trie/stamp.js";
-import * as token from "../users/auth-token.js";
-import { BlocklistFilter } from "../rethinkdns/filter.js";
-import { LogPusher } from "../observability/log-pusher.js";
-import { BlocklistWrapper } from "../rethinkdns/main.js";
+import * as dnsutil from "../../commons/dnsutil.js";
+import * as envutil from "../../commons/envutil.js";
+import * as util from "../../commons/util.js";
+import { log } from "../../core/log.js";
+import * as psk from "../../core/psk.js";
 import { DNSResolver } from "../dns-op/dns-op.js";
+import { LogPusher } from "../observability/log-pusher.js";
+import * as pres from "../plugin-response.js";
+import * as rdnsutil from "../rdns-util.js";
+import { BlocklistFilter } from "../rethinkdns/filter.js";
+import { BlocklistWrapper } from "../rethinkdns/main.js";
+import * as token from "../users/auth-token.js";
 
 export class CommandControl {
   constructor(blocklistWrapper, resolver, logPusher) {
-    this.latestTimestamp = rdnsutil.bareTimestampFrom(cfg.timestamp());
     this.log = log.withTags("CommandControl");
     /** @type {BlocklistWrapper} */
     this.bw = blocklistWrapper;
@@ -122,14 +123,11 @@ export class CommandControl {
 
       this.log.d(rxid, url, "processing... cmd/flag", command, b64UserFlag);
 
-      // resolver may not have been setup, so set it up
-      await this.resolver.lazyInit();
       // blocklistFilter may not have been setup, so set it up
       await this.bw.init(rxid, /* force-wait */ true);
       const blf = this.bw.getBlocklistFilter();
-      const isBlfSetup = rdnsutil.isBlocklistFilterSetup(blf);
-
-      if (!isBlfSetup) throw new Error("no blocklist-filter");
+      if (!rdnsutil.isBlocklistFilterSetup(blf)) throw new Error("no blf");
+      const blfts = this.bw.timestamp(); // throws err if basicconfig is not set
 
       if (command === "listtob64") {
         // convert blocklists (tags) to blockstamp (b64)
@@ -142,10 +140,10 @@ export class CommandControl {
         response.data.httpResponse = await domainNameToList(
           rxid,
           this.resolver,
+          blfts,
           req,
           queryString,
-          blf,
-          this.latestTimestamp
+          blf
         );
       } else if (command === "dntouint") {
         // convert names to flags
@@ -163,6 +161,8 @@ export class CommandControl {
           queryString,
           reqUrl.hostname
         );
+      } else if (command === "gentlspsk") {
+        response.data.httpResponse = await generateTlsPsk();
       } else if (command === "analytics") {
         // redirect to the analytics page
         response.data.httpResponse = await analytics(
@@ -179,7 +179,7 @@ export class CommandControl {
         response.data.httpResponse = configRedirect(
           b64UserFlag,
           reqUrl.origin,
-          this.latestTimestamp,
+          rdnsutil.bareTimestampFrom(blfts),
           !isDnsCmd
         );
       } else {
@@ -237,6 +237,19 @@ async function generateAccessKey(queryString, hostname) {
 }
 
 /**
+ * Returns PSK identity (random 32 bytes as hex) and PSK key derived from KDF_SVC secret.
+ * @returns {Promise<Response>}
+ */
+async function generateTlsPsk() {
+  if (!envutil.allowTlsPsk()) {
+    return util.respond503();
+  }
+
+  const pskcreds = await psk.generateTlsPsk();
+  return jsonResponse(pskcreds.json());
+}
+
+/**
  *
  * @param {LogPusher} lp
  * @param {URL} reqUrl
@@ -284,21 +297,22 @@ async function analytics(lp, reqUrl, auth, lid) {
 /**
  * @param {string} rxid
  * @param {DNSResolver} resolver
+ * @param {string} ts
  * @param {Request} req
  * @param {string} queryString
  * @param {BlocklistFilter} blocklistFilter
- * @param {number} latestTimestamp
  * @returns {Promise<Response>}
  */
 async function domainNameToList(
   rxid,
   resolver,
+  ts,
   req,
   queryString,
-  blocklistFilter,
-  latestTimestamp
+  blocklistFilter
 ) {
   const domainName = queryString.get("dn") || "";
+  const latestTimestamp = util.bareTimestampFrom(ts);
   const r = {
     domainName: domainName,
     version: latestTimestamp,
@@ -320,13 +334,20 @@ async function domainNameToList(
   const rmax = resolver.determineDohResolvers(resolver.ofMax(), forcedoh);
   const res = await resolver.resolveDnsUpstream(
     rxid,
+    ts,
     req,
     rmax,
     query,
     querypacket
   );
   const ans = await res.arrayBuffer();
-  const anspacket = dnsutil.decode(ans);
+  let anspacket;
+  try {
+    anspacket = dnsutil.decode(ans);
+  } catch (e) {
+    log.w(rxid, "malformed dns response in command-control:", e.message);
+    return r; // empty response
+  }
   const ansdomains = dnsutil.extractDomains(anspacket);
 
   for (const d of ansdomains) {

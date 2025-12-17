@@ -9,7 +9,7 @@
  * file, You can obtain one at http://mozilla.org/MPL/2.0/.
  */
 
-import { uid, stub } from "../commons/util.js";
+// no imports!
 
 /**
  * @typedef {'error'|'logpush'|'warn'|'info'|'timer'|'debug'} LogLevels
@@ -32,14 +32,18 @@ function _setConsoleLevel(level) {
     case "error":
     case "logpush":
       globalThis.console.warn = stub();
+    /* falls through */
     case "warn":
       globalThis.console.info = stub();
+    /* falls through */
     case "info":
       globalThis.console.time = stub();
       globalThis.console.timeEnd = stub();
       globalThis.console.timeLog = stub();
+    /* falls through */
     case "timer":
       globalThis.console.debug = stub();
+    /* falls through */
     case "debug":
       break;
     default:
@@ -82,9 +86,6 @@ export default class Log {
   _resetLevel() {
     this.d = stub();
     this.debug = stub();
-    this.lapTime = stub();
-    this.startTime = stub();
-    this.endTime = stub();
     this.i = stub();
     this.info = stub();
     this.w = stub();
@@ -94,42 +95,29 @@ export default class Log {
   }
 
   withTags(...tags) {
-    const that = this;
     return {
-      lapTime: (n, ...r) => {
-        return that.lapTime(n, ...tags, ...r);
-      },
-      startTime: (n, ...r) => {
-        const tid = that.startTime(n);
-        that.d(that.now() + " T", ...tags, "create", tid, ...r);
-        return tid;
-      },
-      endTime: (n, ...r) => {
-        that.d(that.now() + " T", ...tags, "end", n, ...r);
-        return that.endTime(n);
-      },
       d: (...args) => {
-        that.d(that.now() + " D", ...tags, ...args);
+        this.d(this.now() + " D", ...tags, ...args);
       },
       i: (...args) => {
-        that.i(that.now() + " I", ...tags, ...args);
+        this.i(this.now() + " I", ...tags, ...args);
       },
       w: (...args) => {
-        that.w(that.now() + " W", ...tags, ...args);
+        this.w(this.now() + " W", ...tags, ...args);
       },
       e: (...args) => {
-        that.e(that.now() + " E", ...tags, ...args);
+        this.e(this.now() + " E", ...tags, ...args);
       },
       q: (...args) => {
-        that.l(that.now() + " Q", ...tags, ...args);
+        this.l(this.now() + " Q", ...tags, ...args);
       },
       qStart: (...args) => {
-        that.l(that.now() + " Q", ...tags, that.border());
-        that.l(that.now() + " Q", ...tags, ...args);
+        this.l(this.now() + " Q", ...tags, this.border());
+        this.l(this.now() + " Q", ...tags, ...args);
       },
       qEnd: (...args) => {
-        that.l(that.now() + " Q", ...tags, ...args);
-        that.l(that.now() + " Q", ...tags, that.border());
+        this.l(this.now() + " Q", ...tags, ...args);
+        this.l(this.now() + " Q", ...tags, this.border());
       },
       tag: (t) => {
         tags.push(t);
@@ -162,20 +150,17 @@ export default class Log {
       case "debug":
         this.d = console.debug;
         this.debug = console.debug;
+      /* falls through */
       case "timer":
-        this.lapTime = console.timeLog || stub(); // Stubbing required for Fastly as they do not currently support this method.
-        this.startTime = function (name) {
-          name = uid(name);
-          if (console.time) console.time(name);
-          return name;
-        };
-        this.endTime = console.timeEnd || stub(); // Stubbing required for Fastly as they do not currently support this method.
+      // deprecated; fallthrough
       case "info":
         this.i = console.info;
         this.info = console.info;
+      /* falls through */
       case "warn":
         this.w = console.warn;
         this.warn = console.warn;
+      /* falls through */
       case "error":
       case "logpush":
         this.e = console.error;
@@ -184,4 +169,54 @@ export default class Log {
     console.debug("Log level set: ", level);
     this.level = level;
   }
+}
+
+let loggerInstance = null;
+let fallbackLogger = null;
+
+function ensureFallbackLogger() {
+  if (!fallbackLogger) {
+    fallbackLogger = new Log({ level: "debug" });
+  }
+  return fallbackLogger;
+}
+
+export function setLogger(logger) {
+  loggerInstance = logger ?? null;
+  return loggerInstance;
+}
+
+export function getLogger() {
+  return loggerInstance ?? ensureFallbackLogger();
+}
+
+export function hasLogger() {
+  return loggerInstance != null;
+}
+
+export function loggerWithTags(...tags) {
+  return getLogger().withTags(...tags);
+}
+
+export const log = new Proxy(
+  {},
+  {
+    get(_target, prop) {
+      if (prop === "withTags") {
+        return (...tags) => loggerWithTags(...tags);
+      }
+      const logger = getLogger();
+      const value = logger[prop];
+      if (typeof value === "function") {
+        return value.bind(logger);
+      }
+      return value;
+    },
+  }
+);
+
+function stub() {
+  return () => {
+    /* no-op */
+  };
 }

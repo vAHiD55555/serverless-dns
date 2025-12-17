@@ -1,0 +1,227 @@
+name: 🔄 runc
+
+on:
+  push:
+    tags:
+      - "v*"
+  workflow_dispatch:
+
+env:
+  REGISTRY: "ghcr.io"
+  IMAGE_NAME: ${{ github.repository }}
+  IMAGE_NAME_BUN: ${{ github.repository }}-bun
+  GIT_REF: ${{ github.event.inputs.git-ref || github.ref }}
+
+# docs.github.com/en/actions/publishing-packages/publishing-docker-images
+jobs:
+  nodejs:
+    name: 🚀 Node on Alpine
+    runs-on: ubuntu-latest
+    permissions:
+        contents: read
+        packages: write
+        attestations: write
+        id-token: write
+
+    steps:
+      - name: 🚚 Checkout
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ env.GIT_REF }}
+          fetch-depth: 0
+
+      - name: 🔐 Login
+        uses: docker/login-action@v3.6.0
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: 🏷️ Metadata
+        id: meta
+        uses: docker/metadata-action@v5.9.0
+        with:
+          images: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}
+
+      - name: 🛠 Build 
+        id: push
+        uses: docker/build-push-action@v6.18.0
+        with:
+          context: .
+          file: ./node.Dockerfile
+          push: true
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+
+      - name: 📕 Attest
+        uses: actions/attest-build-provenance@v1
+        with:
+          subject-name: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}
+          subject-digest: ${{ steps.push.outputs.digest }}
+          push-to-registry: true
+
+      # github.com/microsoft/sbom-tool
+      # github.com/microsoft/sbom-tool/blob/f5f65011f2/docs/sbom-tool-arguments.md?plain=1#L1
+      - name: 🧾 SBOM
+        run: |
+          mkdir -p "${{ github.workspace }}/sarifoutput"
+
+          # docs.github.com/en/code-security/supply-chain-security/understanding-your-software-supply-chain/exporting-a-software-bill-of-materials-for-your-repository#generating-a-software-bill-of-materials-from-github-actions
+          # github.com/marketplace/actions/spdx-dependency-submission-action
+          curl -Lo $RUNNER_TEMP/sbom-tool https://github.com/microsoft/sbom-tool/releases/latest/download/sbom-tool-linux-x64
+          chmod +x $RUNNER_TEMP/sbom-tool
+          $RUNNER_TEMP/sbom-tool generate -b . -bc . -pn ${{ github.repository }} -pv 1.0.0 -ps Celzero -nsb https://sbom.rethinkdns.com/app -V Verbose
+
+        # github.com/marketplace/actions/anchore-container-scan
+        # github.com/anchore/scan-action
+      - name: 🎞 Grype Container report
+        uses: anchore/scan-action@v7
+        id: scanc
+        with:
+          image: "${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}@${{ steps.push.outputs.digest }}"
+          output-file: "${{ github.workspace }}/sarifoutput/cont.sarif"
+          # fail-build: false
+          # severity-cutoff: critical
+
+        # github.com/marketplace/actions/anchore-container-scan
+        # github.com/anchore/scan-action
+      - name: 🎞 Grype SBOM report
+        uses: anchore/scan-action@v7
+        id: scansbom
+        with:
+          sbom: "${{ github.workspace }}/_manifest/spdx_2.2/manifest.spdx.json"
+          output-file: "${{ github.workspace }}/sarifoutput/sbom.sarif"
+          # fail-build: false
+          # severity-cutoff: critical
+
+      - name: 📻 Grype SBOM to code-scanning
+        uses: github/codeql-action/upload-sarif@v4
+        with:
+          # can also be a directory containing multiple sarif files
+          sarif_file: "${{ github.workspace }}/sarifoutput/"
+
+      - name: 📝 SBOM submission
+        if: success()
+        continue-on-error: true
+        uses: advanced-security/spdx-dependency-submission-action@v0.1.1
+        with:
+          filePath: "_manifest/spdx_2.2/"
+
+      # github.com/actions/attest-sbom
+      # docs.github.com/en/actions/how-tos/secure-your-work/use-artifact-attestations/use-artifact-attestations#generating-an-sbom-attestation-for-binaries
+      - name: 🧶 SBOM attestation
+        if: success()
+        continue-on-error: true
+        uses: actions/attest-sbom@v3
+        with:
+          subject-name: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}
+          subject-digest: ${{ steps.push.outputs.digest }}
+          sbom-path: "${{ github.workspace }}/_manifest/spdx_2.2/manifest.spdx.json"
+          push-to-registry: true
+
+  bunjs:
+    name: 🚀 Bun on Alpine
+    runs-on: ubuntu-latest
+    permissions:
+        contents: read
+        packages: write
+        attestations: write
+        id-token: write
+
+    steps:
+      - name: 🚚 Checkout
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ env.GIT_REF }}
+          fetch-depth: 0
+
+      - name: 🔐 Login
+        uses: docker/login-action@v3.6.0
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: 🏷️ Metadata
+        id: meta
+        uses: docker/metadata-action@v5.9.0
+        with:
+          images: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME_BUN }}
+
+      - name: 🛠 Build
+        # imageid (string), digest (string), metadata (json)
+        id: push
+        uses: docker/build-push-action@v6.18.0
+        with:
+          context: .
+          file: ./bun.Dockerfile
+          push: true
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+
+      - name: 📕 Attest
+        uses: actions/attest-build-provenance@v1
+        with:
+          subject-name: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME_BUN }}
+          subject-digest: ${{ steps.push.outputs.digest }}
+          push-to-registry: true
+
+      # github.com/microsoft/sbom-tool
+      # github.com/microsoft/sbom-tool/blob/f5f65011f2/docs/sbom-tool-arguments.md?plain=1#L1
+      - name: 🧾 SBOM
+        run: |
+          mkdir -p "${{ github.workspace }}/sarifoutput"
+
+          # docs.github.com/en/code-security/supply-chain-security/understanding-your-software-supply-chain/exporting-a-software-bill-of-materials-for-your-repository#generating-a-software-bill-of-materials-from-github-actions
+          # github.com/marketplace/actions/spdx-dependency-submission-action
+          curl -Lo $RUNNER_TEMP/sbom-tool https://github.com/microsoft/sbom-tool/releases/latest/download/sbom-tool-linux-x64
+          chmod +x $RUNNER_TEMP/sbom-tool
+          $RUNNER_TEMP/sbom-tool generate -b . -bc . -pn ${{ github.repository }} -pv 1.0.0 -ps Celzero -nsb https://sbom.rethinkdns.com/app -V Verbose
+
+        # github.com/marketplace/actions/anchore-container-scan
+        # github.com/anchore/scan-action
+      - name: 🎞 Grype Container report
+        uses: anchore/scan-action@v7
+        id: scanc
+        with:
+          # tag would be: fromJSON(steps.meta.outputs.json).images[0].tags[0]
+          image: "${{ env.REGISTRY }}/${{ env.IMAGE_NAME_BUN }}@${{ steps.push.outputs.digest }}"
+          output-file: "${{ github.workspace }}/sarifoutput/cont.sarif"
+          # fail-build: false
+          # severity-cutoff: critical
+
+        # github.com/marketplace/actions/anchore-container-scan
+        # github.com/anchore/scan-action
+      - name: 🎞 Grype SBOM report
+        uses: anchore/scan-action@v7
+        id: scansbom
+        with:
+          sbom: "${{ github.workspace }}/_manifest/spdx_2.2/manifest.spdx.json"
+          output-file: "${{ github.workspace }}/sarifoutput/sbom.sarif"
+          # fail-build: false
+          # severity-cutoff: critical
+
+      - name: 📻 Grype SBOM to code-scanning
+        uses: github/codeql-action/upload-sarif@v4
+        with:
+          # can also be a directory containing multiple sarif files
+          sarif_file: "${{ github.workspace }}/sarifoutput/"
+
+      - name: 📝 SBOM submission
+        if: success()
+        continue-on-error: true
+        uses: advanced-security/spdx-dependency-submission-action@v0.1.1
+        with:
+          filePath: "_manifest/spdx_2.2/"
+
+      # github.com/actions/attest-sbom
+      # docs.github.com/en/actions/how-tos/secure-your-work/use-artifact-attestations/use-artifact-attestations#generating-an-sbom-attestation-for-binaries
+      - name: 🧶 SBOM attestation
+        if: success()
+        continue-on-error: true
+        uses: actions/attest-sbom@v3
+        with:
+          subject-name: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME_BUN }}
+          subject-digest: ${{ steps.push.outputs.digest }}
+          sbom-path: "${{ github.workspace }}/_manifest/spdx_2.2/manifest.spdx.json"
+          push-to-registry: true

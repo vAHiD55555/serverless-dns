@@ -11,16 +11,17 @@
  * TODO: Remove all side-effects and use a constructor?
  * This module has side effects, sequentially setting up the environment.
  */
-import { atob, btoa } from "buffer";
+import { atob, btoa } from "node:buffer";
 import process from "node:process";
-import * as util from "./util.js";
+import * as bufutil from "../../commons/bufutil.js";
+import * as dnst from "../../core/node/dns-transport.js";
+import * as system from "../../system.js";
+import EnvManager from "../env.js";
+import Log, { log, setLogger } from "../log.js";
+import { services, stopAfter } from "../svc.js";
 import * as blocklists from "./blocklists.js";
 import * as dbip from "./dbip.js";
-import Log from "../log.js";
-import * as system from "../../system.js";
-import { services, stopAfter } from "../svc.js";
-import EnvManager from "../env.js";
-import * as swap from "../linux/swap.js";
+import * as util from "./util.js";
 
 // some of the cjs node globals aren't available in esm
 // nodejs.org/docs/latest/api/globals.html
@@ -30,7 +31,7 @@ import * as swap from "../linux/swap.js";
 // globalThis.__filename = fileURLToPath(import.meta.url);
 // globalThis.__dirname = path.dirname(__filename);
 
-(async (main) => {
+((main) => {
   system.when("prepare").then(prep);
   system.when("steady").then(up);
 })();
@@ -45,7 +46,7 @@ async function prep() {
   globalThis.envManager = new EnvManager();
 
   /** Logger */
-  globalThis.log = debugFly
+  const logger = debugFly
     ? new Log({
         level: "debug",
         levelize: profiling, // levelize only if profiling
@@ -56,6 +57,7 @@ async function prep() {
         levelize: isProd || profiling, // levelize if prod or profiling
         withTimestamps: true, // always log timestamps on node
       });
+  setLogger(logger);
 
   // ---- log and envManager available only after this line ---- \\
 
@@ -96,10 +98,12 @@ async function prep() {
         envManager.get("TLS_CRT_PATH")
       );
       setTlsVars(tlsKey, tlsCrt);
-      log.i("dev (local) tls setup from tls_key_path");
+      const l1 = tlsKey.byteLength;
+      const l2 = tlsCrt.byteLength;
+      log.i("dev (local) tls setup from tls_key_path", l1, l2);
     } catch (ex) {
       // this can happen when running server in BLOCKLIST_DOWNLOAD_ONLY mode
-      log.w("Skipping TLS: test TLS crt/key missing; enable TLS offload");
+      log.w("Skipping TLS: test TLS crt/key missing; enable TLS offload", ex);
       tlsoffload = true;
     }
   }
@@ -114,21 +118,30 @@ async function prep() {
     log.i("no atob/btoa polyfill required");
   }
 
-  /** Swap on Fly */
-  if (onFly) {
-    const ok = swap.mkswap();
-    log.i("mkswap done?", ok);
-  } else {
-    log.i("no swap required");
-  }
+  // TODO: move dns* related settings to env
+  // flydns is always ipv6 (fdaa::53)
+  const plainOldDnsIp = onFly ? "fdaa::3" : "1.1.1.2";
+  const dns53 = dnst.makeTransport(plainOldDnsIp);
+  log.i("imported udp/tcp dns transport", plainOldDnsIp);
 
-  /** signal ready */
-  system.pub("ready");
+  // signal ready
+  system.pub("ready", [dns53]);
 }
 
-function setTlsVars(tlsKey, tlsCrt) {
-  envManager.set("TLS_KEY", tlsKey);
-  envManager.set("TLS_CRT", tlsCrt);
+/**
+ * Sets TLS cert and key with envManager under "TLS_CRT" and "TLS_KEY".
+ * @param {BufferSource?} tlsKey - TLS key
+ * @param {BufferSource?} tlsCrt - TLS cert
+ */
+export function setTlsVars(tlsKey, tlsCrt) {
+  if (bufutil.emptyBuf(tlsKey) || bufutil.emptyBuf(tlsCrt)) {
+    log.e("setTlsVars: missing tls key/crt");
+    return;
+  }
+  const tlsKeyB64 = bufutil.toB64(tlsKey);
+  const tlsCrtB64 = bufutil.toB64(tlsCrt);
+  envManager.set("TLS_KEY", tlsKeyB64);
+  envManager.set("TLS_CRT", tlsCrtB64);
 }
 
 async function up() {
@@ -155,6 +168,8 @@ async function up() {
   }
 
   process.on("SIGINT", (sig) => stopAfter());
+
+  process.on("warning", (e) => log.w(e.stack));
 
   // signal all system are-a go
   system.pub("go");

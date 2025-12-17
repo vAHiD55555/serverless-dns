@@ -1,21 +1,20 @@
+// deno-lint-ignore-file no-var
 import * as system from "../../system.js";
 import * as blocklists from "./blocklists.ts";
 import * as dbip from "./dbip.ts";
 import { services, stopAfter } from "../svc.js";
-import Log, { LogLevels } from "../log.js";
+import Log, { setLogger } from "../log.js";
 import EnvManager from "../env.js";
-import { signal } from "https://deno.land/std@0.171.0/signal/mod.ts";
+
+type LogLevels = "error" | "logpush" | "warn" | "info" | "timer" | "debug";
 
 // In global scope.
 declare global {
   // TypeScript must know type of every var / property. Extend Window
   // (globalThis) with declaration merging (archive.is/YUWh2) to define types
   // Ref: www.typescriptlang.org/docs/handbook/declaration-merging.html
-  interface Window {
-    envManager?: EnvManager;
-    log?: Log;
-    env?: any;
-  }
+  var envManager: EnvManager | null;
+  var env: any | null;
 }
 
 ((main) => {
@@ -23,28 +22,22 @@ declare global {
   system.when("steady").then(up);
 })();
 
-async function sigctrl() {
-  const sigs = signal("SIGINT");
-  for await (const _ of sigs) {
-    stopAfter();
-  }
-}
-
-async function prep() {
+function prep() {
   // if this file execs... assume we're on deno.
   if (!Deno) throw new Error("failed loading deno-specific config");
 
-  const isProd = Deno.env.get("DENO_ENV") === "production";
+  const isProd = Deno.env.get("DENO_ENV_DOMAIN") === "production";
   const onDenoDeploy = Deno.env.get("CLOUD_PLATFORM") === "deno-deploy";
   const profiling = Deno.env.get("PROFILE_DNS_RESOLVES") === "true";
 
-  window.envManager = new EnvManager();
+  globalThis.envManager = new EnvManager();
 
-  window.log = new Log({
-    level: window.envManager.get("LOG_LEVEL") as LogLevels,
+  const logger = new Log({
+    level: globalThis.envManager.get("LOG_LEVEL") as LogLevels,
     levelize: isProd || profiling, // levelize if prod or profiling
     withTimestamps: !onDenoDeploy, // do not log ts on deno-deploy
   });
+  setLogger(logger);
 
   // signal ready
   system.pub("ready");
@@ -72,7 +65,12 @@ async function up() {
   } else {
     console.warn("Config", "logpusher unavailable");
   }
-  sigctrl();
+
+  // docs.deno.com/runtime/tutorials/os_signals
+  Deno.addSignalListener("SIGINT", () => {
+    stopAfter();
+  });
+
   // signal all system are-a go
   system.pub("go");
 }

@@ -6,6 +6,7 @@
  * file, You can obtain one at http://mozilla.org/MPL/2.0/.
  */
 import * as envutil from "../../commons/envutil.js";
+import { log } from "../../core/log.js";
 
 export class CacheApi {
   constructor() {
@@ -30,7 +31,7 @@ export class CacheApi {
   /**
    * @param {string} href
    * @param {Response} response
-   * @returns
+   * @returns {Promise<any>}
    */
   put(href, response) {
     if (this.noop) return false;

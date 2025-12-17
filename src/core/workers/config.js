@@ -5,12 +5,12 @@
  * License, v. 2.0. If a copy of the MPL was not distributed with this
  * file, You can obtain one at http://mozilla.org/MPL/2.0/.
  */
-import EnvManager from "../env.js";
 import * as system from "../../system.js";
-import Log from "../log.js";
+import EnvManager from "../env.js";
+import Log, { hasLogger, log, setLogger } from "../log.js";
 import { services } from "../svc.js";
 
-((main) => {
+((_main) => {
   system.when("prepare").then(prep);
   system.when("steady").then(up);
 })();
@@ -22,22 +22,25 @@ function prep(arg) {
   if (!arg) throw new Error("are we on workers?");
   if (!arg.env) throw new Error("workers cannot be setup with empty env");
 
+  const wenv = arg.env;
   // okay to attach env to global, as env across requests remains the same
   // developers.cloudflare.com/workers/runtime-apis/fetch-event/#parameters
-  globalThis.wenv = arg.env;
+  globalThis.wenv = wenv;
 
   if (!globalThis.envManager) {
     globalThis.envManager = new EnvManager();
   }
 
   const isProd = wenv.WORKER_ENV === "production";
+  const lvl = wenv.LOG_LEVEL;
 
-  if (!globalThis.log) {
-    globalThis.log = new Log({
-      level: envManager.get("LOG_LEVEL"),
-      levelize: isProd, // levelize only in prod
-      withTimestamps: false, // no need to log ts on workers
-    });
+  if (!hasLogger()) {
+    setLogger(
+      new Log({
+        level: lvl || "info",
+        levelize: isProd,
+      })
+    );
   }
 
   // on Workers, the network-context isn't available in global-scope

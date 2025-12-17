@@ -6,18 +6,18 @@
  * file, You can obtain one at http://mozilla.org/MPL/2.0/.
  */
 
-import { services } from "./svc.js";
 import * as bufutil from "../commons/bufutil.js";
 import * as dnsutil from "../commons/dnsutil.js";
 import * as envutil from "../commons/envutil.js";
-import * as rdnsutil from "../plugins/rdns-util.js";
 import * as util from "../commons/util.js";
-import IOState from "./io-state.js";
 import { RResp } from "../plugins/plugin-response.js";
+import * as rdnsutil from "../plugins/rdns-util.js";
+import IOState from "./io-state.js";
+import { log } from "./log.js";
+import { services } from "./svc.js";
 
 export default class RethinkPlugin {
   /**
-   *
    * @param {{request: Request, waitUntil: Function, respondWith: Function}} event
    */
   constructor(event) {
@@ -53,7 +53,7 @@ export default class RethinkPlugin {
     this.registerPlugin(
       "userOp",
       services.userOp,
-      ["rxid", "request", "isDnsMsg"],
+      ["rxid", "request", "requestDecodedDnsPacket", "isDnsMsg"],
       this.userOpCallback
     );
 
@@ -142,10 +142,7 @@ export default class RethinkPlugin {
 
   async execute() {
     const io = this.io;
-    const rxid = this.ctx.get("rxid");
-
-    const t = this.log.startTime("exec-plugin-" + rxid);
-
+    // const rxid = this.ctx.get("rxid");
     for (const p of this.plugin) {
       if (io.stopProcessing && !p.continueOnStopProcess) {
         continue;
@@ -154,19 +151,12 @@ export default class RethinkPlugin {
         continue;
       }
 
-      this.log.lapTime(t, rxid, p.name, "send-io");
-
       const res = await p.module.exec(makectx(this.ctx, p.pctx));
-
-      this.log.lapTime(t, rxid, p.name, "got-res");
 
       if (typeof p.callback === "function") {
         await p.callback.call(this, res, io);
       }
-
-      this.log.lapTime(t, rxid, p.name, "post-callback");
     }
-    this.log.endTime(t);
   }
 
   /**
@@ -187,8 +177,8 @@ export default class RethinkPlugin {
   /**
    * Adds "userBlocklistInfo", "userBlocklistInfo",  and "dnsResolverUrl"
    * to RethinkPlugin ctx.
-   * @param {RResp} response - Contains data: userBlocklistInfo / userBlockstamp
-   * @param {IOState} io
+   * @param {RResp} response
+   * @param {Promise<IOState>} io
    */
   async userOpCallback(response, io) {
     const rxid = this.ctx.get("rxid");

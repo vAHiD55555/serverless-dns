@@ -5,7 +5,7 @@
  * License, v. 2.0. If a copy of the MPL was not distributed with this
  * file, You can obtain one at http://mozilla.org/MPL/2.0/.
  */
-import { Buffer } from "buffer";
+import { Buffer } from "node:buffer";
 import * as util from "./util.js";
 
 export const ZERO = new Uint8Array();
@@ -26,7 +26,7 @@ export function toStr(b) {
 
 export function fromB64(b64std) {
   if (util.emptyString(b64std)) return ZERO;
-  return Buffer.from(b64std, "base64");
+  return normalize8(Buffer.from(b64std, "base64"));
 }
 
 export function toB64(buf) {
@@ -34,6 +34,16 @@ export function toB64(buf) {
   if (buf instanceof Buffer) return buf.toString("base64");
   const u8 = normalize8(buf);
   return Buffer.of(u8).toString("base64");
+}
+
+/**
+ * Returns true if s is a valid hex string.
+ * @param {string} s
+ * @returns {boolean}
+ */
+export function isHex(s) {
+  if (util.emptyString(s)) return false;
+  return /^[0-9a-fA-F]+$/.test(s);
 }
 
 export function hex(b) {
@@ -47,12 +57,22 @@ export function hex(b) {
 }
 
 /**
+ * @param {string} h
+ * @returns {Uint8Array}
+ */
+export function hex2buf(h) {
+  if (util.emptyString(h)) return ZERO;
+  if (!isHex(h)) return ZERO;
+  return new Uint8Array(h.match(/.{1,2}/g).map((w) => parseInt(w, 16)));
+}
+
+/**
  * @param { Buffer | Uint8Array | ArrayBuffer } b
  * @returns {number}
  */
 export function len(b) {
   if (emptyBuf(b)) return 0;
-  return b.byteLength;
+  return b.byteLength || 0;
 }
 
 export function bytesToBase64Url(b) {
@@ -98,13 +118,21 @@ export function base64ToBytes(b64uri) {
 }
 
 export function decodeFromBinary(b, u8) {
-  // if b is a u8 array, simply u16 it
-  if (u8) return new Uint16Array(raw(b));
-
   // if b is a binary-string, convert it to u8
-  const bytes = binaryStringToBytes(b);
-  // ...and then to u16
-  return new Uint16Array(raw(bytes));
+  const conv = u8 ? b : binaryStringToBytes(b);
+
+  // Ensure the byte array has even length for Uint16Array
+  // Uint16Array requires byte length to be a multiple of 2
+  const ab = raw(conv);
+  if (ab.byteLength % 2 !== 0) {
+    // Pad with an extra zero byte if odd length
+    const padded = new Uint8Array(ab.byteLength + 1);
+    padded.set(new Uint8Array(ab));
+    padded[ab.byteLength] = 0;
+    return new Uint16Array(padded.buffer);
+  }
+
+  return new Uint16Array(ab);
 }
 
 export function decodeFromBinaryArray(b) {
@@ -112,11 +140,19 @@ export function decodeFromBinaryArray(b) {
   return decodeFromBinary(b, u8);
 }
 
+/**
+ * @param {ArrayBufferLike} b
+ * @returns {boolean}
+ */
 export function emptyBuf(b) {
   return !b || b.byteLength <= 0;
 }
 
-// returns underlying buffer prop when b is TypedArray or node:Buffer
+/**
+ * Returns underlying buffer prop when b is TypedArray or node:Buffer
+ * @param {Uint8Array|Buffer} b
+ * @returns {ArrayBufferLike}
+ */
 export function raw(b) {
   if (!b || b.buffer == null) b = ZERO;
 
@@ -127,6 +163,7 @@ export function raw(b) {
 // b is either an ArrayBuffer, a TypedArray, or a node:Buffer
 export function normalize8(b) {
   if (emptyBuf(b)) return ZERO;
+  if (b instanceof Uint8Array) return b;
 
   let underlyingBuffer = null;
   // ... has byteLength property, b must be of type ArrayBuffer;
@@ -169,11 +206,19 @@ export function bufferOf(arrayBuf) {
   return Buffer.from(new Uint8Array(arrayBuf));
 }
 
+/**
+ * @param {Buffer} b
+ * @returns {int}
+ */
 export function recycleBuffer(b) {
   b.fill(0);
   return 0;
 }
 
+/**
+ * @param {int} size
+ * @returns {Buffer}
+ */
 export function createBuffer(size) {
   return Buffer.allocUnsafe(size);
 }

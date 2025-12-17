@@ -6,12 +6,13 @@
  * file, You can obtain one at http://mozilla.org/MPL/2.0/.
  */
 
-import { DnsBlocker } from "./blocker.js";
-import * as cacheutil from "../cache-util.js";
-import * as rdnsutil from "../rdns-util.js";
-import * as pres from "../plugin-response.js";
 import * as dnsutil from "../../commons/dnsutil.js";
 import * as util from "../../commons/util.js";
+import { log } from "../../core/log.js";
+import * as cacheutil from "../cache-util.js";
+import * as pres from "../plugin-response.js";
+import * as rdnsutil from "../rdns-util.js";
+import { DnsBlocker } from "./blocker.js";
 
 export class DNSCacheResponder {
   constructor(blocklistWrapper, cache) {
@@ -48,6 +49,12 @@ export class DNSCacheResponder {
     return response;
   }
 
+  /**
+   * @param {string} rxid
+   * @param {any} packet
+   * @param {pres.BStamp} blockInfo
+   * @returns {Promise<pres.RespData>}
+   */
   async resolveFromCache(rxid, packet, blockInfo) {
     const noAnswer = pres.rdnsNoBlockResponse();
     // if blocklist-filter is setup, then there's no need to query http-cache
@@ -61,16 +68,19 @@ export class DNSCacheResponder {
     // on Cloudflare, which not only has "free" egress, but also different
     // runtime (faster hw and sw) and deployment model (v8 isolates).
     const blf = this.bw.getBlocklistFilter();
-    const onlyLocal =
-      this.bw.disabled() || rdnsutil.isBlocklistFilterSetup(blf);
+    const hasblf = rdnsutil.isBlocklistFilterSetup(blf);
+    const onlyLocal = this.bw.disabled() || hasblf;
+    const ts = hasblf ? this.bw.timestamp(util.yyyymm()) : util.yyyymm();
 
-    const k = cacheutil.makeHttpCacheKey(packet);
+    const k = cacheutil.makeHttpCacheKey(packet, ts);
     if (!k) return noAnswer;
 
     const cr = await this.cache.get(k, onlyLocal);
-    this.log.d(rxid, onlyLocal, "cache k/m", k.href, cr && cr.metadata);
+    const hascr = !util.emptyObj(cr);
+    const hasm = hascr && cr.metadata != null;
+    this.log.d(rxid, "l/b?", onlyLocal, hasblf, "cache k/m", k.href, hasm);
 
-    if (util.emptyObj(cr)) return noAnswer;
+    if (!hascr) return noAnswer;
 
     // note: stamps in cr may be out-of-date; for ex, consider a
     // scenario where v6.example.com AAAA to fda3:: today,
@@ -101,10 +111,16 @@ export class DNSCacheResponder {
     return pres.dnsResponse(res.dnsPacket, reencoded, res.stamps);
   }
 
+  /**
+   * @param {string} rxid
+   * @param {pres.RespData} r
+   * @param {pres.BStamp} blockInfo
+   * @returns {pres.RespData}
+   */
   makeCacheResponse(rxid, r, blockInfo) {
     // check incoming dns request against blocklists in cache-metadata
     this.blocker.blockQuestion(rxid, /* out*/ r, blockInfo);
-    this.log.d(rxid, blockInfo, "question blocked?", r.isBlocked);
+    this.log.d(rxid, blockInfo, "q block?", r.isBlocked);
     if (r.isBlocked) {
       return r;
     }
@@ -117,7 +133,7 @@ export class DNSCacheResponder {
 
     // check outgoing cached dns-packet against blocklists
     this.blocker.blockAnswer(rxid, /* out*/ r, blockInfo);
-    this.log.d(rxid, "answer block?", r.isBlocked);
+    this.log.d(rxid, "a block?", r.isBlocked);
 
     return r;
   }

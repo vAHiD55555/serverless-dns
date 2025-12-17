@@ -6,15 +6,22 @@
  * file, You can obtain one at http://mozilla.org/MPL/2.0/.
  */
 
+import * as dnsutil from "../../commons/dnsutil.js";
+import { log } from "../../core/log.js";
 import * as pres from "../plugin-response.js";
 import * as rdnsutil from "../rdns-util.js";
-import * as dnsutil from "../../commons/dnsutil.js";
 
 export class DnsBlocker {
   constructor() {
     this.log = log.withTags("DnsBlocker");
   }
 
+  /**
+   * @param {string} rxid
+   * @param {pres.RespData} req
+   * @param {pres.BlockstampInfo} blockInfo
+   * @returns {pres.RespData}
+   */
   blockQuestion(rxid, req, blockInfo) {
     const dnsPacket = req.dnsPacket;
     const stamps = req.stamps;
@@ -40,6 +47,12 @@ export class DnsBlocker {
     return pres.copyOnlyBlockProperties(req, bres);
   }
 
+  /**
+   * @param {string} rxid
+   * @param {pres.RespData} res
+   * @param {pres.BlockstampInfo} blockInfo
+   * @returns {pres.RespData}
+   */
   blockAnswer(rxid, res, blockInfo) {
     const dnsPacket = res.dnsPacket;
     const stamps = res.stamps;
@@ -71,6 +84,12 @@ export class DnsBlocker {
     return pres.copyOnlyBlockProperties(res, bres);
   }
 
+  /**
+   * @param {string[]} names
+   * @param {pres.BlockstampInfo} blockInfo
+   * @param {pres.BStamp} blockstamps
+   * @returns {pres.RespData}
+   */
   block(names, blockInfo, blockstamps) {
     let r = pres.rdnsNoBlockResponse();
     for (const n of names) {

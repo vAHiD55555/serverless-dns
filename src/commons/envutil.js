@@ -8,6 +8,12 @@
 
 // musn't import /depend on anything.
 
+export function isProd() {
+  if (!envManager) return false;
+
+  return envManager.determineEnvStage() === "production";
+}
+
 export function onFly() {
   if (!envManager) return false;
 
@@ -45,6 +51,11 @@ export function hasDisk() {
   return onFly() || onLocal();
 }
 
+export function useMmap() {
+  // got disk on fly and local deploys
+  return (onFly() || onLocal()) && (isNode() || isBun());
+}
+
 export function hasDynamicImports() {
   if (onDenoDeploy() || onCloudflare() || onFastly()) return false;
   return true;
@@ -52,6 +63,12 @@ export function hasDynamicImports() {
 
 export function hasHttpCache() {
   return isWorkers();
+}
+
+export function isBun() {
+  if (!envManager) return false;
+
+  return envManager.r() === "bun";
 }
 
 export function isWorkers() {
@@ -78,6 +95,9 @@ export function isDeno() {
   return envManager.r() === "deno";
 }
 
+/**
+ * in milliseconds
+ */
 export function workersTimeout(missing = 0) {
   if (!envManager) return missing;
   return envManager.get("WORKER_TIMEOUT") || missing;
@@ -164,6 +184,28 @@ export function tlsKey() {
   return envManager.get("TLS_KEY") || null;
 }
 
+export function allowDomainFronting() {
+  if (!envManager) return false;
+  return envManager.get("TLS_ALLOW_ANY_SNI");
+}
+
+export function allowTlsPsk() {
+  if (isBun()) return false;
+  return tlsPskHex() != null;
+}
+
+export function tlsPskHex() {
+  if (!envManager) return null;
+  const psk = envManager.get("TLS_PSK");
+  if (psk == null || psk.length <= 0) return null;
+  return b64tohexIfNeeded(psk);
+}
+
+export function kdfSvcSecretHex() {
+  if (!envManager) return null;
+  return envManager.get("KDF_SVC") || null;
+}
+
 export function cacheTtl() {
   if (!envManager) return 0;
   return envManager.get("CACHE_TTL");
@@ -185,14 +227,14 @@ export function isCleartext() {
 
 // sysctl get net.ipv4.tcp_syn_backlog
 export function tcpBacklog() {
-  if (!envManager) return 100;
+  if (!envManager) return 600; // same as fly.service soft_limit
 
-  return envManager.get("TCP_BACKLOG") || 100;
+  return envManager.get("TCP_BACKLOG") || 600;
 }
 
 // don't forget to update the fly.toml too
 export function maxconns() {
-  if (!envManager) return 1000;
+  if (!envManager) return 1000; // 25% higher than fly.service hard_limit
 
   return envManager.get("MAXCONNS") || 1000;
 }
@@ -216,12 +258,10 @@ export function shutdownTimeoutMs() {
 }
 
 export function measureHeap() {
-  // disable; webpack can't bundle memwatch; see: server-node.js
-  return false;
   if (!envManager) return false;
   const reg = region();
   if (
-    reg === "maa" ||
+    reg === "bom" ||
     reg === "sin" ||
     reg === "fra" ||
     reg === "ams" ||
@@ -240,6 +280,12 @@ export function blocklistDownloadOnly() {
 
   // run the server just to download the blocklist files and do nothing else
   return envManager.get("BLOCKLIST_DOWNLOAD_ONLY");
+}
+
+export function renewBlocklistsThresholdInWeeks() {
+  if (!envManager) return false;
+
+  return envManager.get("AUTO_RENEW_BLOCKLISTS_OLDER_THAN") || -1;
 }
 
 // Ports which the services are exposed on. Corresponds to fly.toml ports.
@@ -280,10 +326,47 @@ export function imageRef() {
   return envManager.get("FLY_IMAGE_REF") || "";
 }
 
+export function hostId() {
+  if (!envManager) return "";
+
+  return envManager.get("HOST_IDENTIFIER") || "";
+}
+
 export function secretb64() {
   if (!envManager) return null;
 
-  return envManager.get("TOP_SECRET_512_B64") || null;
+  const psk = envManager.get("TLS_PSK");
+  if (psk != null && psk.length > 0) {
+    return hex2b64IfNeeded(psk);
+  }
+  const topsecret = envManager.get("TOP_SECRET_512_B64");
+  if (topsecret != null && topsecret.length > 0) {
+    return hex2b64IfNeeded(topsecret);
+  }
+  return null;
+}
+
+function hex2b64IfNeeded(h) {
+  const ishex = /^[0-9a-fA-F]+$/.test(h);
+  if (!ishex) return h;
+
+  const u8 = new Uint8Array(h.match(/.{1,2}/g).map((w) => parseInt(w, 16)));
+  const b64 = btoa(String.fromCharCode(...u8));
+  return b64;
+}
+
+/**
+ * @param {string} b64
+ * @returns {string}
+ */
+function b64tohexIfNeeded(b64) {
+  const ishex = /^[0-9a-fA-F]+$/.test(b64);
+  if (ishex) return b64;
+  // atob binary string is Latin-1 encoded, so each charCodeAt is a byte (8 bit).
+  const u8 = Uint8Array.from(atob(b64), (c) => c.charCodeAt(0));
+  return Array.prototype.map
+    .call(u8, (b) => b.toString(16).padStart(2, "0"))
+    .join("");
 }
 
 export function accessKeys() {
@@ -300,16 +383,6 @@ export function forceDoh() {
 
   // on node, default to using plain old dns
   return envManager.get("NODE_DOH_ONLY") || false;
-}
-
-export function avoidFetch() {
-  if (!envManager) return false;
-
-  // on other runtimes, continue using fetch
-  if (!isNode()) return false;
-
-  // on node, default to avoiding fetch
-  return envManager.get("NODE_AVOID_FETCH") || false;
 }
 
 export function disableDnsCache() {
@@ -333,6 +406,7 @@ export function blockSubdomains() {
 }
 
 // recurisve resolver on Fly
+// see: node/config.js#prep
 export function recursive() {
   return onFly();
 }
@@ -381,7 +455,7 @@ export function logpushSecretKey() {
   if (!envManager) return "";
 
   const secretkey = envManager.get("CF_LOGPUSH_R2_SECRET_KEY") || "";
-  if (onCloudflare() || onLocal()) return secretkey;
+  if (onCloudflare() || onLocal()) return secretkey || "";
 
   return "";
 }

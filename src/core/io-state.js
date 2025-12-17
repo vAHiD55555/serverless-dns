@@ -8,22 +8,37 @@
 
 import * as bufutil from "../commons/bufutil.js";
 import * as dnsutil from "../commons/dnsutil.js";
+import * as envutil from "../commons/envutil.js";
 import * as util from "../commons/util.js";
+import { log } from "./log.js";
 
 export default class IOState {
   constructor() {
+    /** @type {string} */
     this.flag = "";
+    /** @type {any} */
     this.decodedDnsPacket = this.emptyDecodedDnsPacket();
-    /** @type {Response} */
-    this.httpResponse = undefined;
+    /** @type {Response?} */
+    this.httpResponse = null;
+    /** @type {boolean} */
+    this.isProd = envutil.isProd();
+    /** @type {boolean} */
     this.isException = false;
-    this.exceptionStack = undefined;
+    /** @type {string} */
+    this.exceptionStack = null;
+    /** @type {string} */
     this.exceptionFrom = "";
+    /** @type {boolean} */
     this.isDnsBlock = false;
+    /** @type {boolean} */
     this.alwaysGatewayAnswer = false;
+    /** @type {string} */
     this.gwip4 = "";
+    /** @type {string} */
     this.gwip6 = "";
+    /** @type {string} */
     this.region = "";
+    /** @type {boolean} */
     this.stopProcessing = false;
     this.log = log.withTags("IOState");
   }
@@ -56,7 +71,9 @@ export default class IOState {
   initDecodedDnsPacketIfNeeded() {
     if (!this.decodedDnsPacket) {
       this.decodedDnsPacket = this.emptyDecodedDnsPacket();
+      return true;
     }
+    return false;
   }
 
   dnsExceptionResponse(res) {
@@ -73,21 +90,47 @@ export default class IOState {
       this.exceptionFrom = res.exceptionFrom || "no-origin";
     }
 
-    const qid = this.decodedDnsPacket.id;
-    const questions = this.decodedDnsPacket.questions;
-    const servfail = dnsutil.servfail(qid, questions);
-    const ex = {
-      exceptionFrom: this.exceptionFrom,
-      exceptionStack: this.exceptionStack,
-    };
+    try {
+      const qid = this.decodedDnsPacket.id; // may be null
+      const questions = this.decodedDnsPacket.questions; // may be null
+      const servfail = dnsutil.servfail(qid, questions); // may be empty
+      const hasServfail = !bufutil.emptyBuf(servfail);
+      const ex = {
+        exceptionFrom: this.exceptionFrom,
+        exceptionStack: this.exceptionStack,
+      };
 
-    this.httpResponse = new Response(servfail, {
-      headers: util.concatHeaders(
-        this.headers(servfail),
-        this.additionalHeader(JSON.stringify(ex))
-      ),
-      status: servfail ? 200 : 408, // rfc8484 section-4.2.1
-    });
+      if (hasServfail) {
+        // TODO: try-catch as decode may throw?
+        this.decodedDnsPacket = dnsutil.decode(servfail);
+      }
+
+      this.logDnsPkt();
+      this.httpResponse = new Response(servfail, {
+        headers: util.concatHeaders(
+          this.headers(servfail),
+          this.debugHeaders(JSON.stringify(ex))
+        ),
+        status: hasServfail ? 200 : 408, // rfc8484 section-4.2.1
+      });
+    } catch (e) {
+      const pktjson = JSON.stringify(this.decodedDnsPacket || {});
+      this.log.e("dnsExceptionResponse", pktjson, e.stack);
+      if (
+        this.exceptionStack === "no-res" ||
+        this.exceptionStack === "no-stack"
+      ) {
+        this.exceptionStack = e.stack;
+        this.exceptionFrom = "IOState:errorResponse";
+      }
+      this.httpResponse = new Response(null, {
+        headers: util.concatHeaders(
+          this.headers(),
+          this.debugHeaders(JSON.stringify(this.exceptionStack))
+        ),
+        status: 503,
+      });
+    }
   }
 
   hResponse(r) {
@@ -123,20 +166,33 @@ export default class IOState {
       this.decodedDnsPacket = dnsPacket || dnsutil.decode(arrayBuffer);
     }
 
+    this.logDnsPkt();
     this.httpResponse = new Response(arrayBuffer, {
       headers: this.headers(arrayBuffer),
     });
   }
 
+  logDnsPkt() {
+    if (this.isProd) return;
+    this.log.d(
+      "domains",
+      dnsutil.extractDomains(this.decodedDnsPacket),
+      dnsutil.getQueryType(this.decodedDnsPacket) || "",
+      "data",
+      dnsutil.getInterestingAnswerData(this.decodedDnsPacket),
+      dnsutil.ttl(this.decodedDnsPacket)
+    );
+  }
+
   dnsBlockResponse(blockflag) {
-    this.initDecodedDnsPacketIfNeeded();
+    this.initDecodedDnsPacketIfNeeded(); // initializes to empty obj
     this.stopProcessing = true;
     this.isDnsBlock = true;
     this.flag = blockflag;
 
     try {
       this.assignBlockResponse();
-      const b = dnsutil.encode(this.decodedDnsPacket);
+      const b = dnsutil.encode(this.decodedDnsPacket); // may throw if empty or malformed
       this.httpResponse = new Response(b, {
         headers: this.headers(b),
       });
@@ -148,7 +204,7 @@ export default class IOState {
       this.httpResponse = new Response(null, {
         headers: util.concatHeaders(
           this.headers(),
-          this.additionalHeader(JSON.stringify(this.exceptionStack))
+          this.debugHeaders(JSON.stringify(this.exceptionStack))
         ),
         status: 503,
       });
@@ -174,7 +230,7 @@ export default class IOState {
       this.httpResponse = new Response(null, {
         headers: util.concatHeaders(
           this.headers(),
-          this.additionalHeader(JSON.stringify(this.exceptionStack))
+          this.debugHeaders(JSON.stringify(this.exceptionStack))
         ),
         status: 503,
       });
@@ -182,8 +238,11 @@ export default class IOState {
   }
 
   headers(b = null) {
-    const xNileFlags = this.isDnsBlock ? { "x-nile-flags": this.flag } : null;
-    const xNileFlagsOk = !xNileFlags ? { "x-nile-flags-dn": this.flag } : null;
+    const hasBlockFlag = !util.emptyString(this.flag);
+    const isBlocked = hasBlockFlag && this.isDnsBlock;
+    const couldBlock = hasBlockFlag && !this.isDnsBlock;
+    const xNileFlags = isBlocked ? { "x-nile-flags": this.flag } : null;
+    const xNileFlagsOk = couldBlock ? { "x-nile-flags-dn": this.flag } : null;
     const xNileRegion = !util.emptyString(this.region)
       ? { "x-nile-region": this.region }
       : null;
@@ -191,13 +250,15 @@ export default class IOState {
     return util.concatHeaders(
       util.dnsHeaders(),
       util.contentLengthHeader(b),
+      this.cacheHeaders(),
       xNileRegion,
       xNileFlags,
       xNileFlagsOk
     );
   }
 
-  additionalHeader(json) {
+  debugHeaders(json) {
+    if (this.isProd) return null;
     if (!json) return null;
 
     return {
@@ -213,6 +274,16 @@ export default class IOState {
     for (const [k, v] of Object.entries(util.corsHeaders())) {
       this.httpResponse.headers.set(k, v);
     }
+  }
+
+  // set cache from ttl in decoded-dns-packet
+  cacheHeaders() {
+    const ttl = dnsutil.ttl(this.decodedDnsPacket);
+    if (ttl <= 0) return null;
+
+    return {
+      "cache-control": "public, max-age=" + ttl,
+    };
   }
 
   assignBlockResponse() {
